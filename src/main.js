@@ -6,11 +6,12 @@ import {
   CANVAS_W,
   CANVAS_H,
   DEVICE_PRESETS,
-} from './core/posterRenderer.js?v=20260509c';
-import { loadTitleFont } from './core/textRenderer.js?v=20260509c';
-import { loadImageFromFile } from './utils/imageLoader.js?v=20260509c';
-import { downloadBlob, downloadZip, sanitizeFilename } from './utils/exporter.js?v=20260509c';
-import { rgbToHex } from './utils/colorUtils.js?v=20260509c';
+  getOutputSize,
+} from './core/posterRenderer.js?v=20260511a';
+import { loadTitleFont } from './core/textRenderer.js?v=20260511a';
+import { loadImageFromFile } from './utils/imageLoader.js?v=20260511a';
+import { downloadBlob, downloadZip, sanitizeFilename } from './utils/exporter.js?v=20260511a';
+import { rgbToHex } from './utils/colorUtils.js?v=20260511a';
 
 // ---------- 状态 ----------
 // 每个 device 维护独立的 image / 羽化参数，互不影响
@@ -154,17 +155,22 @@ function setupDeviceSwitcher() {
 function applyDevicePreset(device, render) {
   const preset = DEVICE_PRESETS[device];
   const dev = getCurDevState();
+  const out = getOutputSize(device);
 
-  // 1. 顶栏文案 & 上传区文案 & 预览徽章
-  if (dom.brandSub) dom.brandSub.textContent = `上传 poster · 输入标题 · 一键生成 ${preset.canvasW}×${preset.canvasH} 精美卡片`;
-  if (dom.dropHintSize) dom.dropHintSize.textContent = `建议上传尺寸 ${preset.posterW}×${preset.posterH}`;
-  if (dom.previewBadge) dom.previewBadge.textContent = `预览 · ${preset.canvasW} × ${preset.canvasH}`;
+  // 1. 顶栏文案 & 上传区文案 & 预览徽章（显示输出实际像素）
+  if (dom.brandSub) dom.brandSub.textContent = `上传 poster · 输入标题 · 一键生成 ${out.width}×${out.height} 精美卡片`;
+  if (dom.dropHintSize) dom.dropHintSize.textContent = `建议上传尺寸 ${preset.posterW}×${preset.posterH}（设计稿基准）`;
+  if (dom.previewBadge) {
+    dom.previewBadge.textContent = out.scale > 1
+      ? `预览 · ${out.width} × ${out.height}（${out.scale}x 高清）`
+      : `预览 · ${out.width} × ${out.height}`;
+  }
 
-  // 2. canvas 尺寸切换（避免上一端的旧画面残留）
-  dom.previewCanvas.width = preset.canvasW;
-  dom.previewCanvas.height = preset.canvasH;
+  // 2. canvas 尺寸切换：使用输出实际像素
+  dom.previewCanvas.width = out.width;
+  dom.previewCanvas.height = out.height;
 
-  // 3. 羽化滑块上限 & 默认值
+  // 3. 羽化滑块上限 & 默认值（基准像素，不含 scale）
   dom.leftErase.max = preset.featherMax.left;
   dom.leftSoftness.max = preset.featherMax.left;
   dom.bottomErase.max = preset.featherMax.bottom;
@@ -184,9 +190,9 @@ function applyDevicePreset(device, render) {
   if (!dev.image) {
     dom.previewPlaceholder.style.display = '';
     const ctx = dom.previewCanvas.getContext('2d');
-    ctx.clearRect(0, 0, preset.canvasW, preset.canvasH);
+    ctx.clearRect(0, 0, out.width, out.height);
   } else if (render) {
-    _needRecolor = true; // 不同设备使用同一张图也无所谓，但取色结果可复用 → 这里强制重渲，但取色复用
+    _needRecolor = true;
     triggerSingleRender();
   }
 }
@@ -306,9 +312,9 @@ function setupSingleControls() {
     try {
       await triggerSingleRender();
       const blob = await canvasToBlob(dom.previewCanvas);
-      const preset = DEVICE_PRESETS[state.device];
+      const out = getOutputSize(state.device);
       const baseName = sanitizeFilename(state.single.title || 'poster');
-      const name = `${baseName}_${preset.canvasW}x${preset.canvasH}.png`;
+      const name = `${baseName}_${out.width}x${out.height}.png`;
       downloadBlob(blob, name);
     } catch (e) {
       alert('生成失败：' + e.message);
@@ -515,13 +521,17 @@ function renderBatchGrid() {
   dom.batchGrid.innerHTML = '';
   devices.forEach((device) => {
     const preset = DEVICE_PRESETS[device];
+    const out = getOutputSize(device);
     const group = document.createElement('div');
     group.className = 'batch-group';
     group.dataset.device = device;
+    const sizeLabel = out.scale > 1
+      ? `${out.width}×${out.height} (${out.scale}x)`
+      : `${out.width}×${out.height}`;
     group.innerHTML = `
       <div class="batch-group-head">
         <span class="bg-name">${preset.label}</span>
-        <span class="bg-size">${preset.canvasW}×${preset.canvasH}</span>
+        <span class="bg-size">${sizeLabel}</span>
       </div>
       <div class="batch-group-cards"></div>
     `;
@@ -532,7 +542,7 @@ function renderBatchGrid() {
       card.dataset.id = it.id;
       card.dataset.device = device;
       card.innerHTML = `
-        <canvas width="${preset.canvasW}" height="${preset.canvasH}"></canvas>
+        <canvas width="${out.width}" height="${out.height}"></canvas>
         <div class="cap">${escapeHtml(it.title || it.file.name)}</div>
       `;
       cardsWrap.appendChild(card);
@@ -552,6 +562,7 @@ async function runBatch(devices) {
 
   for (const device of devices) {
     const preset = DEVICE_PRESETS[device];
+    const out = getOutputSize(device);
     // 读取单张模式中该端当前的羽化参数
     const f = state.single.devices[device].feather;
 
@@ -580,7 +591,7 @@ async function runBatch(devices) {
         it.results[device] = { status: 'done', blob };
         const baseName = sanitizeFilename(it.title || it.file.name.replace(/\.[^.]+$/, ''));
         filesByDevice[device].push({
-          name: `${device}/${baseName}_${preset.canvasW}x${preset.canvasH}.png`,
+          name: `${device}/${baseName}_${out.width}x${out.height}.png`,
           blob,
         });
         if (card) {

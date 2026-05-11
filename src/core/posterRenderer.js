@@ -11,14 +11,16 @@ import { rgbToHex } from '../utils/colorUtils.js';
 
 /**
  * 设备预设
- *  - canvasW/H：成品画布尺寸
+ *  - canvasW/H：成品画布尺寸（设计稿基准尺寸，未含 scale）
  *  - posterW/H：右上角原图区域尺寸
  *  - medalW/H：勋章尺寸
  *  - padLeft/padTop：左上角整体内边距
  *  - gapTitle：勋章与标题之间的水平间距
  *  - fontSize / strokeWidth：标题字号 / 描边宽度
  *  - feather: { leftErase, leftSoftness, bottomErase, bottomSoftness }
- *  - featherMax: { left, bottom }   羽化滑块的最大可调上限
+ *  - featherMax: { left, bottom }   羽化滑块的最大可调上限（基准尺寸下）
+ *  - scale: 输出放大倍数（默认 1）。所有尺寸/字号/羽化值在渲染时统一乘以 scale，
+ *           以提升 Pad/手机端的清晰度。
  */
 export const DEVICE_PRESETS = {
   // 现有 OTT 端（保持不变）
@@ -39,8 +41,9 @@ export const DEVICE_PRESETS = {
     titleMaxCharsNoMedal: 9,
     feather: { leftErase: 40, leftSoftness: 135, bottomErase: 65, bottomSoftness: 90 },
     featherMax: { left: 580, bottom: 326 },
+    scale: 1,
   },
-  // Pad 端：成品 364×180，poster 区域 221×124
+  // Pad 端：基准 364×180，3 倍输出 → 1092×540
   pad: {
     label: 'Pad 端',
     canvasW: 364,
@@ -56,12 +59,11 @@ export const DEVICE_PRESETS = {
     strokeWidth: 1.6,
     titleMaxCharsWithMedal: 7,
     titleMaxCharsNoMedal: 8,
-    // 渐变规范：横向 304×158（左 0% / 中 50% 100% / 右 100%）
-    // 转换到 poster 内部，约等于：左侧硬擦 60，软渐 50；下侧硬擦 0，软渐 60
     feather: { leftErase: 60, leftSoftness: 50, bottomErase: 0, bottomSoftness: 60 },
     featherMax: { left: 221, bottom: 124 },
+    scale: 3,
   },
-  // 手机端：成品 358×200，poster 区域 204×115
+  // 手机端：基准 358×200，3 倍输出 → 1074×600
   phone: {
     label: '手机端',
     canvasW: 358,
@@ -77,10 +79,9 @@ export const DEVICE_PRESETS = {
     strokeWidth: 1.4,
     titleMaxCharsWithMedal: 7,
     titleMaxCharsNoMedal: 8,
-    // 渐变规范：纵向 358×124（上 0% → 30% 100% → 100% 100%）
-    // 体现为下侧无硬擦、软渐变较大；左侧也有少量软过渡承接背景
     feather: { leftErase: 24, leftSoftness: 50, bottomErase: 0, bottomSoftness: 36 },
     featherMax: { left: 204, bottom: 115 },
+    scale: 3,
   },
 };
 
@@ -118,6 +119,15 @@ export function loadMedal() {
 }
 
 /**
+ * 获取某个端的最终输出尺寸（含 scale）
+ */
+export function getOutputSize(device) {
+  const p = DEVICE_PRESETS[device] || DEVICE_PRESETS.ott;
+  const s = p.scale || 1;
+  return { width: p.canvasW * s, height: p.canvasH * s, scale: s };
+}
+
+/**
  * 渲染单张成品到目标 canvas
  * @param {HTMLCanvasElement} canvas
  * @param {object} opts
@@ -126,6 +136,7 @@ export function loadMedal() {
  *   - medalImage: HTMLImageElement
  *   - device: 'ott' | 'pad' | 'phone'   设备预设，默认 'ott'
  *   - leftErase / bottomErase / leftSoftness / bottomSoftness: 可覆盖预设
+ *     （传入的为"基准像素值"，渲染时会按 scale 自动放大）
  *   - showMedal: boolean  默认 true
  *   - cachedPalette: object 跳过取色
  */
@@ -139,52 +150,61 @@ export async function renderToCanvas(canvas, opts) {
   } = opts;
 
   const preset = DEVICE_PRESETS[device] || DEVICE_PRESETS.ott;
+  const scale = preset.scale || 1;
 
-  // 用预设默认值兜底
+  // 用预设默认值兜底（基准像素，未含 scale）
   const fLeftErase    = (typeof leftErase    === 'number') ? leftErase    : preset.feather.leftErase;
   const fLeftSoft     = (typeof leftSoftness === 'number') ? leftSoftness : preset.feather.leftSoftness;
   const fBottomErase  = (typeof bottomErase  === 'number') ? bottomErase  : preset.feather.bottomErase;
   const fBottomSoft   = (typeof bottomSoftness === 'number') ? bottomSoftness : preset.feather.bottomSoftness;
 
-  canvas.width = preset.canvasW;
-  canvas.height = preset.canvasH;
+  // 实际渲染尺寸 = 设计基准 × scale
+  const W = preset.canvasW * scale;
+  const H = preset.canvasH * scale;
+  const PW = preset.posterW * scale;
+  const PH = preset.posterH * scale;
+
+  canvas.width = W;
+  canvas.height = H;
   const ctx = canvas.getContext('2d');
-  ctx.clearRect(0, 0, preset.canvasW, preset.canvasH);
+  ctx.imageSmoothingEnabled = true;
+  ctx.imageSmoothingQuality = 'high';
+  ctx.clearRect(0, 0, W, H);
 
   // 1. 取色
   const { palette, bg, bgAux, stroke } = cachedPalette || await extractPalette(posterImage);
 
   // 2. 背景渐变
-  drawGradientBackground(ctx, preset.canvasW, preset.canvasH, bg, bgAux);
+  drawGradientBackground(ctx, W, H, bg, bgAux);
 
-  // 3. 裁剪 + 羽化 poster
-  const posterCanvas = cropAndResize(posterImage, preset.posterW, preset.posterH);
-  featherEdges(posterCanvas, fLeftErase, fBottomErase, fLeftSoft, fBottomSoft);
+  // 3. 裁剪 + 羽化 poster（直接用放大后的目标尺寸做高清裁剪）
+  const posterCanvas = cropAndResize(posterImage, PW, PH);
+  featherEdges(posterCanvas, fLeftErase * scale, fBottomErase * scale, fLeftSoft * scale, fBottomSoft * scale);
 
   // 4. 贴到右上角
-  const px = preset.canvasW - preset.posterW;
+  const px = W - PW;
   const py = 0;
   ctx.drawImage(posterCanvas, px, py);
 
   // 5. 勋章
   if (showMedal && medalImage) {
-    ctx.drawImage(medalImage, preset.padLeft, preset.padTop, preset.medalW, preset.medalH);
+    ctx.drawImage(medalImage, preset.padLeft * scale, preset.padTop * scale, preset.medalW * scale, preset.medalH * scale);
   }
 
   // 6. 标题
   let titleX, titleMaxChars;
   if (showMedal) {
-    titleX = preset.padLeft + preset.medalW + preset.gapTitle;
+    titleX = (preset.padLeft + preset.medalW + preset.gapTitle) * scale;
     titleMaxChars = preset.titleMaxCharsWithMedal;
   } else {
-    titleX = preset.padLeft;
+    titleX = preset.padLeft * scale;
     titleMaxChars = preset.titleMaxCharsNoMedal;
   }
-  drawTitleText(ctx, title || '', titleX, preset.padTop, {
-    fontSize: preset.fontSize,
+  drawTitleText(ctx, title || '', titleX, preset.padTop * scale, {
+    fontSize: preset.fontSize * scale,
     fillColor: '#FFFFFF',
     strokeColor: rgbToHex(stroke),
-    strokeWidth: preset.strokeWidth,
+    strokeWidth: preset.strokeWidth * scale,
     textBaseline: 'top',
     textAlign: 'left',
     maxChars: titleMaxChars,
